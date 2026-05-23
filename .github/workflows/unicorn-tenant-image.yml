@@ -14,8 +14,7 @@ on:
         type: boolean
   push:
     branches:
-      - master
-      - main
+      - deploy
     tags:
       - "v*"
 
