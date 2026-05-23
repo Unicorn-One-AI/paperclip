@@ -82,6 +82,7 @@ const adapterDisplayMap: Record<string, AdapterDisplayInfo> = {
     label: "Grok Build",
     description: "Local Grok Build agent",
     icon: Bot,
+    hideFromVisualSelection: true,
   },
   opencode_local: {
     label: "OpenCode",
@@ -107,6 +108,7 @@ const adapterDisplayMap: Record<string, AdapterDisplayInfo> = {
     label: "Cursor Cloud",
     description: "Managed remote Cursor agent",
     icon: MousePointer2,
+    hideFromVisualSelection: true,
   },
   openclaw_gateway: {
     label: "OpenClaw Gateway",

@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, timingSafeEqual } from "node:crypto";
 import type { IncomingMessage, Server as HttpServer } from "node:http";
 import { createRequire } from "node:module";
 import type { Duplex } from "node:stream";
@@ -120,6 +120,9 @@ async function authorizeUpgrade(
       return null;
     }
 
+    const cloudTenantContext = authorizeCloudTenantUpgrade(req, companyId);
+    if (cloudTenantContext) return cloudTenantContext;
+
     const session = await opts.resolveSessionFromHeaders(headersFromIncomingMessage(req));
     const userId = session?.user?.id;
     if (!userId) return null;
@@ -173,6 +176,45 @@ async function authorizeUpgrade(
     actorType: "agent",
     actorId: key.agentId,
   };
+}
+
+function authorizeCloudTenantUpgrade(req: IncomingMessage, companyId: string): UpgradeContext | null {
+  const expectedToken = process.env.PAPERCLIP_CLOUD_TENANT_SERVER_TOKEN?.trim();
+  if (!expectedToken) return null;
+
+  const token = headerValue(req, "x-paperclip-cloud-tenant-token")?.trim();
+  if (!token || !constantTimeStringEqual(token, expectedToken)) return null;
+
+  const stackId = headerValue(req, "x-paperclip-cloud-stack-id")?.trim();
+  const userId = headerValue(req, "x-paperclip-cloud-user-id")?.trim();
+  if (!stackId || !userId || cloudTenantCompanyId(stackId) !== companyId) {
+    return null;
+  }
+
+  return {
+    companyId,
+    actorType: "board",
+    actorId: userId,
+  };
+}
+
+function headerValue(req: IncomingMessage, name: string) {
+  const value = req.headers[name.toLowerCase()];
+  return Array.isArray(value) ? value[0] : value;
+}
+
+function constantTimeStringEqual(left: string, right: string): boolean {
+  const leftBuffer = Buffer.from(left);
+  const rightBuffer = Buffer.from(right);
+  return leftBuffer.length === rightBuffer.length && timingSafeEqual(leftBuffer, rightBuffer);
+}
+
+function cloudTenantCompanyId(stackId: string): string {
+  const bytes = createHash("sha256").update(`paperclip-cloud-tenant-company:${stackId}`).digest();
+  bytes[6] = (bytes[6] & 0x0f) | 0x50;
+  bytes[8] = (bytes[8] & 0x3f) | 0x80;
+  const hex = bytes.subarray(0, 16).toString("hex");
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20, 32)}`;
 }
 
 export function setupLiveEventsWebSocketServer(

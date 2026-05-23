@@ -1,0 +1,187 @@
+name: UnicornOne tenant image
+
+on:
+  workflow_dispatch:
+    inputs:
+      unicorn_ref:
+        description: "UnicornOne monorepo branch, tag, or SHA"
+        required: false
+        default: "main"
+      push_stable:
+        description: "Also push the stable tag"
+        required: false
+        default: true
+        type: boolean
+  push:
+    branches:
+      - master
+      - main
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: unicorn-tenant-image-${{ github.ref_name }}
+  cancel-in-progress: true
+
+env:
+  REGISTRY: ghcr.io
+  TENANT_IMAGE_NAME: unicornone-paperclip-tenant
+  UNICORN_REPOSITORY: Unicorn-One-AI/Unicorn
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+
+    steps:
+      - name: Checkout Paperclip
+        uses: actions/checkout@v4
+        with:
+          path: paperclip-src
+
+      - name: Checkout UnicornOne
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.UNICORN_REPOSITORY }}
+          ref: ${{ inputs.unicorn_ref || 'main' }}
+          path: unicorn-src
+          token: ${{ secrets.UNICORN_REPO_TOKEN || github.token }}
+
+      - name: Set image metadata
+        id: meta
+        shell: bash
+        run: |
+          set -euo pipefail
+          owner="$(printf '%s' "${GITHUB_REPOSITORY_OWNER}" | tr '[:upper:]' '[:lower:]')"
+          paperclip_sha="$(git -C paperclip-src rev-parse HEAD)"
+          unicorn_sha="$(git -C unicorn-src rev-parse HEAD)"
+          paperclip_short_sha="${paperclip_sha:0:12}"
+          unicorn_short_sha="${unicorn_sha:0:12}"
+          ref_name="${GITHUB_REF_NAME}"
+          ref_type="${GITHUB_REF_TYPE}"
+          ref_tag="$(printf '%s' "$ref_name" | tr '/[:upper:]' '-[:lower:]')"
+          build_date="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          if [ "$ref_type" = "tag" ]; then
+            gateway_version="$ref_name"
+          else
+            gateway_version="paperclip-${ref_tag}-${paperclip_short_sha}"
+          fi
+          {
+            echo "paperclip_sha=$paperclip_sha"
+            echo "paperclip_short_sha=$paperclip_short_sha"
+            echo "unicorn_sha=$unicorn_sha"
+            echo "unicorn_short_sha=$unicorn_short_sha"
+            echo "ref_tag=$ref_tag"
+            echo "ref_type=$ref_type"
+            echo "gateway_version=$gateway_version"
+            echo "build_date=$build_date"
+            echo "tenant_image=$REGISTRY/$owner/$TENANT_IMAGE_NAME"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Setup Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Prepare build context
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p build-context
+          cp -R unicorn-src/monorepo/proxy build-context/proxy
+          cp -R paperclip-src build-context/paperclip
+
+      - name: Build tenant image
+        shell: bash
+        run: |
+          set -euo pipefail
+          image="${{ steps.meta.outputs.tenant_image }}"
+          docker build \
+            --file build-context/proxy/Dockerfile \
+            --build-arg GATEWAY_VERSION="${{ steps.meta.outputs.gateway_version }}" \
+            --build-arg GATEWAY_COMMIT="${{ steps.meta.outputs.unicorn_sha }}" \
+            --build-arg PAPERCLIP_COMMIT="${{ steps.meta.outputs.paperclip_sha }}" \
+            --build-arg BUILD_DATE="${{ steps.meta.outputs.build_date }}" \
+            --label org.opencontainers.image.source="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}" \
+            --label org.opencontainers.image.revision="${{ steps.meta.outputs.paperclip_sha }}" \
+            --label org.opencontainers.image.version="${{ steps.meta.outputs.gateway_version }}" \
+            --label org.opencontainers.image.created="${{ steps.meta.outputs.build_date }}" \
+            --label one.unicorn.proxy.source="${GITHUB_SERVER_URL}/${{ env.UNICORN_REPOSITORY }}" \
+            --label one.unicorn.proxy.revision="${{ steps.meta.outputs.unicorn_sha }}" \
+            --tag "$image:paperclip-${{ steps.meta.outputs.paperclip_sha }}" \
+            --tag "$image:paperclip-${{ steps.meta.outputs.paperclip_short_sha }}" \
+            --tag "$image:paperclip-${{ steps.meta.outputs.paperclip_short_sha }}-proxy-${{ steps.meta.outputs.unicorn_short_sha }}" \
+            --tag "$image:${{ steps.meta.outputs.ref_tag }}" \
+            build-context
+          if [ "${{ steps.meta.outputs.ref_type }}" = "branch" ] && { [ "${{ steps.meta.outputs.ref_tag }}" = "master" ] || [ "${{ steps.meta.outputs.ref_tag }}" = "main" ]; }; then
+            docker tag "$image:paperclip-${{ steps.meta.outputs.paperclip_sha }}" "$image:paperclip-latest"
+          fi
+          if [ "${{ inputs.push_stable || false }}" = "true" ] || { [ "${{ steps.meta.outputs.ref_type }}" = "branch" ] && { [ "${{ steps.meta.outputs.ref_tag }}" = "master" ] || [ "${{ steps.meta.outputs.ref_tag }}" = "main" ]; }; }; then
+            docker tag "$image:paperclip-${{ steps.meta.outputs.paperclip_sha }}" "$image:stable"
+          fi
+
+      - name: Smoke test tenant image
+        shell: bash
+        env:
+          TENANT_IMAGE: ${{ steps.meta.outputs.tenant_image }}:paperclip-${{ steps.meta.outputs.paperclip_sha }}
+          DATABASE_URL: postgresql://paperclip:paperclip@postgres:5432/paperclip
+        run: |
+          set -euo pipefail
+          docker compose -f unicorn-src/monorepo/.github/ci/tenant-smoke.compose.yml up -d
+          for attempt in $(seq 1 60); do
+            if curl -fsS http://127.0.0.1:3100/healthz; then
+              exit 0
+            fi
+            if ! docker compose -f unicorn-src/monorepo/.github/ci/tenant-smoke.compose.yml ps --status running tenant | grep -q tenant; then
+              docker compose -f unicorn-src/monorepo/.github/ci/tenant-smoke.compose.yml ps
+              docker compose -f unicorn-src/monorepo/.github/ci/tenant-smoke.compose.yml logs --no-color tenant
+              exit 1
+            fi
+            sleep 2
+          done
+          docker compose -f unicorn-src/monorepo/.github/ci/tenant-smoke.compose.yml ps
+          docker compose -f unicorn-src/monorepo/.github/ci/tenant-smoke.compose.yml logs --no-color
+          exit 1
+
+      - name: Stop smoke test containers
+        if: always()
+        shell: bash
+        run: docker compose -f unicorn-src/monorepo/.github/ci/tenant-smoke.compose.yml down -v --remove-orphans || true
+
+      - name: Push tenant image
+        shell: bash
+        run: |
+          set -euo pipefail
+          image="${{ steps.meta.outputs.tenant_image }}"
+          docker push "$image:paperclip-${{ steps.meta.outputs.paperclip_sha }}"
+          docker push "$image:paperclip-${{ steps.meta.outputs.paperclip_short_sha }}"
+          docker push "$image:paperclip-${{ steps.meta.outputs.paperclip_short_sha }}-proxy-${{ steps.meta.outputs.unicorn_short_sha }}"
+          docker push "$image:${{ steps.meta.outputs.ref_tag }}"
+          if docker image inspect "$image:paperclip-latest" >/dev/null 2>&1; then
+            docker push "$image:paperclip-latest"
+          fi
+          if docker image inspect "$image:stable" >/dev/null 2>&1; then
+            docker push "$image:stable"
+          fi
+
+      - name: Summary
+        shell: bash
+        run: |
+          {
+            echo "### UnicornOne tenant image"
+            echo
+            echo "- Paperclip SHA: \`${{ steps.meta.outputs.paperclip_sha }}\`"
+            echo "- UnicornOne SHA: \`${{ steps.meta.outputs.unicorn_sha }}\`"
+            echo "- Tenant image: \`${{ steps.meta.outputs.tenant_image }}:paperclip-${{ steps.meta.outputs.paperclip_sha }}\`"
+            echo "- Short tag: \`${{ steps.meta.outputs.tenant_image }}:paperclip-${{ steps.meta.outputs.paperclip_short_sha }}\`"
+            echo "- Combined tag: \`${{ steps.meta.outputs.tenant_image }}:paperclip-${{ steps.meta.outputs.paperclip_short_sha }}-proxy-${{ steps.meta.outputs.unicorn_short_sha }}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
