@@ -1,9 +1,9 @@
 import { createHash, timingSafeEqual } from "node:crypto";
 import { Router } from "express";
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import { z } from "zod";
 import type { Db } from "@paperclipai/db";
-import { authUsers, companies } from "@paperclipai/db";
+import { authUsers, companies, companyMemberships } from "@paperclipai/db";
 import { HUMAN_COMPANY_MEMBERSHIP_ROLES } from "@paperclipai/shared";
 import { badRequest, notFound, unauthorized } from "../errors.js";
 import { accessService } from "../services/index.js";
@@ -13,6 +13,7 @@ import {
 } from "../services/company-member-roles.js";
 
 const syncMembershipsSchema = z.object({
+  action: z.enum(["upsert", "archive"]).default("upsert"),
   user: z.object({
     id: z.string().min(1),
     email: z.string().email(),
@@ -43,26 +44,28 @@ export function cloudMembershipSyncRoutes(db: Db) {
     const userName = payload.user.name?.trim() || payload.user.email;
     const userEmail = payload.user.email.trim().toLowerCase();
 
-    await db
-      .insert(authUsers)
-      .values({
-        id: payload.user.id,
-        name: userName,
-        email: userEmail,
-        emailVerified: true,
-        image: null,
-        createdAt: now,
-        updatedAt: now,
-      })
-      .onConflictDoUpdate({
-        target: authUsers.id,
-        set: {
+    if (payload.action === "upsert") {
+      await db
+        .insert(authUsers)
+        .values({
+          id: payload.user.id,
           name: userName,
           email: userEmail,
           emailVerified: true,
+          image: null,
+          createdAt: now,
           updatedAt: now,
-        },
-      });
+        })
+        .onConflictDoUpdate({
+          target: authUsers.id,
+          set: {
+            name: userName,
+            email: userEmail,
+            emailVerified: true,
+            updatedAt: now,
+          },
+        });
+    }
 
     const synced = [];
     for (const membership of payload.memberships) {
@@ -72,7 +75,7 @@ export function cloudMembershipSyncRoutes(db: Db) {
         membership.companyName?.trim() ||
         (membership.stackId ? `${membership.stackId.trim()} Paperclip` : null);
 
-      if (membership.stackId) {
+      if (membership.stackId && payload.action === "upsert") {
         const stackId = membership.stackId.trim();
         await db
           .insert(companies)
@@ -96,20 +99,39 @@ export function cloudMembershipSyncRoutes(db: Db) {
         if (!existing) throw notFound("Company not found");
       }
 
-      const member = await access.ensureMembership(
-        companyId,
-        "user",
-        payload.user.id,
-        role,
-        "active",
-      );
-      await access.setPrincipalGrants(
-        companyId,
-        "user",
-        payload.user.id,
-        grantsForHumanRole(role),
-        null,
-      );
+      if (payload.action === "archive") {
+        const member = await db
+          .select()
+          .from(companyMemberships)
+          .where(
+            and(
+              eq(companyMemberships.companyId, companyId),
+              eq(companyMemberships.principalType, "user"),
+              eq(companyMemberships.principalId, payload.user.id),
+            ),
+          )
+          .then((rows) => rows[0] ?? null);
+        if (!member) {
+          synced.push({
+            companyId,
+            membershipId: null,
+            membershipRole: null,
+            status: "not_found",
+          });
+          continue;
+        }
+        const result = await access.archiveMember(companyId, member.id);
+        synced.push({
+          companyId,
+          membershipId: result?.member.id ?? member.id,
+          membershipRole: result?.member.membershipRole ?? member.membershipRole,
+          status: result?.member.status ?? member.status,
+        });
+        continue;
+      }
+
+      const member = await access.ensureMembership(companyId, "user", payload.user.id, role, "active");
+      await access.setPrincipalGrants(companyId, "user", payload.user.id, grantsForHumanRole(role), null);
       synced.push({
         companyId,
         membershipId: member.id,
