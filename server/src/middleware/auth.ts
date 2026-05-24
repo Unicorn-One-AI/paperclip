@@ -200,8 +200,6 @@ export function actorMiddleware(db: Db, opts: ActorMiddlewareOptions): RequestHa
 }
 
 async function resolveCloudTenantActor(db: Db, req: Request): Promise<Express.Request["actor"] | null> {
-  if (isTrustedCloudRoute(req)) return null;
-
   const expectedToken = process.env.PAPERCLIP_CLOUD_TENANT_SERVER_TOKEN?.trim();
   if (!expectedToken) return null;
 
@@ -308,10 +306,6 @@ async function resolveCloudTenantActor(db: Db, req: Request): Promise<Express.Re
     isInstanceAdmin: true,
     source: "cloud_tenant",
   };
-}
-
-function isTrustedCloudRoute(req: Request) {
-  return req.method.toUpperCase() === "POST" && req.path === "/api/cloud/memberships/sync";
 }
 
 function requiredCloudHeader(req: Request, name: string): string {

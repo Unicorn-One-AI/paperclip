@@ -38,7 +38,10 @@ export function cloudMembershipSyncRoutes(db: Db) {
   const access = accessService(db);
 
   router.post("/cloud/memberships/sync", async (req, res) => {
-    assertTrustedCloudSyncRequest(req.header("x-paperclip-cloud-tenant-token"));
+    assertTrustedCloudSyncRequest(
+      req.header("x-unicorn-cloud-sync-token") ??
+        req.header("x-paperclip-cloud-tenant-token"),
+    );
     const payload = syncMembershipsSchema.parse(req.body);
     const now = new Date();
     const userName = payload.user.name?.trim() || payload.user.email;
