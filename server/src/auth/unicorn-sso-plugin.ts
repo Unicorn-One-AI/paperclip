@@ -67,7 +67,12 @@ export function unicornSsoPlugin(db: Db): BetterAuthPlugin {
             user,
           });
 
-          return Response.redirect(resolveSafeRedirect(ctx.query.next, ctx.context.baseURL));
+          return new Response(null, {
+            status: 302,
+            headers: {
+              location: resolveSafeRedirect(ctx.query.next, ctx.context.baseURL).toString(),
+            },
+          });
         },
       ),
     },
