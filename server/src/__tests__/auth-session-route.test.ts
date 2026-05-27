@@ -92,7 +92,29 @@ describe("actorMiddleware authenticated session profile", () => {
         };
         return chain;
       }),
-      select: vi.fn(),
+      select: vi.fn(() => ({
+        from() {
+          return {
+            where() {
+              const seededMembership = inserts
+                .map((insert) => insert.values)
+                .find((values) => typeof values.companyId === "string");
+              return Promise.resolve([
+                {
+                  companyId: seededMembership?.companyId,
+                  membershipRole: seededMembership?.membershipRole,
+                  status: seededMembership?.status,
+                },
+                {
+                  companyId: "existing-company-2",
+                  membershipRole: "member",
+                  status: "active",
+                },
+              ]);
+            },
+          };
+        },
+      })),
     } as any;
     const app = express();
     app.use(
@@ -123,9 +145,19 @@ describe("actorMiddleware authenticated session profile", () => {
       userEmail: "owner@example.com",
       source: "cloud_tenant",
       isInstanceAdmin: true,
-      memberships: [expect.objectContaining({ membershipRole: "owner", status: "active" })],
     });
     expect(res.body.companyIds[0]).toMatch(/^[0-9a-f-]{36}$/);
+    expect(res.body.memberships).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ membershipRole: "owner", status: "active" }),
+      ]),
+    );
+    expect(res.body.companyIds).toContain("existing-company-2");
+    expect(res.body.memberships).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ companyId: "existing-company-2", membershipRole: "member", status: "active" }),
+      ]),
+    );
     expect(inserts).toHaveLength(4);
     expect(inserts[0]?.values).toMatchObject({
       id: "global-user-1",

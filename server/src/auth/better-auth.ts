@@ -12,6 +12,7 @@ import {
 } from "@paperclipai/db";
 import type { Config } from "../config.js";
 import { resolvePaperclipInstanceId } from "../home-paths.js";
+import { unicornSsoPlugin } from "./unicorn-sso-plugin.js";
 
 export type BetterAuthSessionUser = {
   id: string;
@@ -120,6 +121,9 @@ export function createBetterAuthInstance(db: Db, config: Config, trustedOrigins:
       requireEmailVerification: false,
       disableSignUp: config.authDisableSignUp,
     },
+    plugins: [
+      unicornSsoPlugin(),
+    ],
     advanced: buildBetterAuthAdvancedOptions({ disableSecureCookies: isHttpOnly }),
   };
 

@@ -291,18 +291,35 @@ async function resolveCloudTenantActor(db: Db, req: Request): Promise<Express.Re
       membershipRole,
       status: "active",
     });
+  const memberships = await db
+    .select({
+      companyId: companyMemberships.companyId,
+      membershipRole: companyMemberships.membershipRole,
+      status: companyMemberships.status,
+    })
+    .from(companyMemberships)
+    .where(
+      and(
+        eq(companyMemberships.principalType, "user"),
+        eq(companyMemberships.principalId, userId),
+        eq(companyMemberships.status, "active"),
+      ),
+    );
+  const activeMemberships = memberships.length > 0
+    ? memberships
+    : [{
+        companyId,
+        membershipRole: membership.membershipRole,
+        status: membership.status,
+      }];
 
   return {
     type: "board",
     userId,
     userName,
     userEmail,
-    companyIds: [companyId],
-    memberships: [{
-      companyId,
-      membershipRole: membership.membershipRole,
-      status: membership.status,
-    }],
+    companyIds: activeMemberships.map((row) => row.companyId),
+    memberships: activeMemberships,
     isInstanceAdmin: true,
     source: "cloud_tenant",
   };
