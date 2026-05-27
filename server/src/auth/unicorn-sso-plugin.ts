@@ -3,7 +3,10 @@ import { APIError } from "better-auth/api";
 import { setSessionCookie } from "better-auth/cookies";
 import type { BetterAuthPlugin } from "better-auth";
 import { createAuthEndpoint } from "better-auth/api";
+import { eq } from "drizzle-orm";
 import { z } from "zod";
+import type { Db } from "@paperclipai/db";
+import { authUsers, instanceUserRoles } from "@paperclipai/db";
 
 type UnicornSsoExchangeResponse = {
   userId: string;
@@ -21,12 +24,30 @@ type UnicornInstancePrivateJwk = {
   d?: string;
 };
 
+type AuthUser = {
+  id: string;
+  email: string;
+  name: string;
+  emailVerified: boolean;
+  createdAt: Date;
+  updatedAt: Date;
+  image?: string | null;
+};
+
+type SsoAuthContext = {
+  context: {
+    internalAdapter: {
+      createSession: (userId: string) => Promise<unknown>;
+    };
+  };
+};
+
 const unicornSsoQuerySchema = z.object({
   token: z.string().min(1),
   next: z.string().optional(),
 });
 
-export function unicornSsoPlugin(): BetterAuthPlugin {
+export function unicornSsoPlugin(db: Db): BetterAuthPlugin {
   return {
     id: "unicorn-sso",
     endpoints: {
@@ -38,28 +59,7 @@ export function unicornSsoPlugin(): BetterAuthPlugin {
         },
         async (ctx) => {
           const exchanged = await exchangeUnicornSsoToken(ctx.query.token);
-          const email = exchanged.email.trim().toLowerCase();
-          const name = exchanged.name?.trim() || email;
-
-          const existingById = await ctx.context.internalAdapter.findUserById(exchanged.userId);
-          const existingByEmail = existingById ? null : await ctx.context.internalAdapter.findUserByEmail(email);
-          const user = existingById
-            ? await ctx.context.internalAdapter.updateUser(existingById.id, {
-                email,
-                name,
-                emailVerified: true,
-              })
-            : existingByEmail?.user?.id
-              ? await ctx.context.internalAdapter.updateUser(existingByEmail.user.id, {
-                  name,
-                  emailVerified: true,
-                })
-              : await ctx.context.internalAdapter.createUser({
-                  id: exchanged.userId,
-                  email,
-                  name,
-                  emailVerified: true,
-                });
+          const user = await syncSsoUserAndEntitlements(db, exchanged);
           const session = await ctx.context.internalAdapter.createSession(user.id);
 
           await setSessionCookie(ctx, {
@@ -72,6 +72,74 @@ export function unicornSsoPlugin(): BetterAuthPlugin {
       ),
     },
   };
+}
+
+async function syncSsoUserAndEntitlements(
+  db: Db,
+  exchanged: UnicornSsoExchangeResponse,
+) {
+  const email = exchanged.email.trim().toLowerCase();
+  const name = exchanged.name?.trim() || email;
+  const now = new Date();
+
+  return db.transaction(async (tx) => {
+    const existing = await tx
+      .select()
+      .from(authUsers)
+      .where(eq(authUsers.id, exchanged.userId))
+      .then((rows) => rows[0] ?? null);
+    const existingByEmail = existing
+      ? null
+      : await tx
+          .select()
+          .from(authUsers)
+          .where(eq(authUsers.email, email))
+          .then((rows) => rows[0] ?? null);
+    const userId = existing?.id ?? existingByEmail?.id ?? exchanged.userId;
+
+    const user = await tx
+      .insert(authUsers)
+      .values({
+        id: userId,
+        email,
+        name,
+        emailVerified: true,
+        image: existing?.image ?? existingByEmail?.image ?? null,
+        createdAt: existing?.createdAt ?? existingByEmail?.createdAt ?? now,
+        updatedAt: now,
+      })
+      .onConflictDoUpdate({
+        target: authUsers.id,
+        set: {
+          email,
+          name,
+          emailVerified: true,
+          updatedAt: now,
+        },
+      })
+      .returning()
+      .then((rows) => rows[0]);
+
+    if (isInstanceAdminRole(exchanged.role)) {
+      await tx
+        .insert(instanceUserRoles)
+        .values({
+          userId: user.id,
+          role: "instance_admin",
+          updatedAt: now,
+        })
+        .onConflictDoUpdate({
+          target: [instanceUserRoles.userId, instanceUserRoles.role],
+          set: { updatedAt: now },
+        });
+    }
+
+    return user;
+  });
+}
+
+function isInstanceAdminRole(role: string) {
+  return role === "owner" || role === "admin";
 }
 
 async function exchangeUnicornSsoToken(token: string): Promise<UnicornSsoExchangeResponse> {

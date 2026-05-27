@@ -122,7 +122,7 @@ export function createBetterAuthInstance(db: Db, config: Config, trustedOrigins:
       disableSignUp: config.authDisableSignUp,
     },
     plugins: [
-      unicornSsoPlugin(),
+      unicornSsoPlugin(db),
     ],
     advanced: buildBetterAuthAdvancedOptions({ disableSecureCookies: isHttpOnly }),
   };
