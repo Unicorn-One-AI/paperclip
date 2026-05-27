@@ -115,7 +115,6 @@ async function exchangeUnicornSsoToken(token: string): Promise<UnicornSsoExchang
 
 function signInstanceJwt() {
   const instanceId = requiredEnv("UNICORN_INSTANCE_ID");
-  const companyId = requiredEnv("UNICORN_COMPANY_ID");
   const privateJwk = parseInstancePrivateJwk();
   const now = Math.floor(Date.now() / 1000);
   const header: Record<string, unknown> = {
@@ -131,7 +130,6 @@ function signInstanceJwt() {
     aud: "unicorn-control-plane",
     sub: instanceId,
     instanceId,
-    companyId,
     iat: now,
     exp: now + 60,
     jti: randomBytes(18).toString("base64url"),
